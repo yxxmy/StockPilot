@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from agents.deepseek import AgentError
+from agents.report_text import EVIDENCE_DIVIDER
 from agents import workflow
 from agents.workflow import build_graph, risk_facts
 from tools.indicators import calculate_indicators
@@ -32,6 +33,11 @@ def test_local_graph_order_and_shared_state():
     assert result["market_facts"]["actual_range"] == ["2024-01-01", "2024-02-23"]
     assert "未调用大模型" in result["report"]
     assert "事实数据" in result["report"]
+    body, evidence = result["report"].split(EVIDENCE_DIVIDER)
+    assert "2024-02-23 收盘 14.00 元，较上一交易日上涨 7.69%，成交 100 手" in body
+    assert "高于近 5 个交易日均价（12.00 元）" in body
+    assert "40 个交易日记录" in body and "区间表现与风险" in body
+    assert '"latest"' not in body and '"latest"' in evidence
     assert "error" not in result
 
 
@@ -91,6 +97,10 @@ def test_short_sample_keeps_null_and_zero_volume_flag():
     assert "rsi14" in result["market_facts"]["missing_indicators"]
     assert any("零成交量" in flag for flag in result["risk_facts"]["flags"])
     assert "NaN" not in result["report"]
+    body = result["report"].split(EVIDENCE_DIVIDER)[0]
+    assert "缺少上一交易日收盘价" in body and "成交 0 手" in body
+    assert "暂无法计算5 日均价、10 日均价、20 日均价" in body
+    assert "无法比较区间涨跌" in body and "零成交量" in body
 
 
 def test_missing_key_fails_before_loading_market(monkeypatch):

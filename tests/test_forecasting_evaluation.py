@@ -103,7 +103,13 @@ def test_unique_persistence_manifest_and_no_overwrite(frames,tmp_path):
 
 def test_real_models_complete_rolling_pipeline(frames):
     # 实际调用原基线与arch，不要求每个窗口都收敛，更不预设哪种模型更优。
-    exp=evaluate_snapshot(make_snapshot(frames))
+    exp=evaluate_snapshot(make_snapshot(frames), include_latest=True)
+    latest = exp["next_observation"]
+    end = exp["data_metadata"]["actual_range"][-1]
+    baseline = latest["predictions"][RollingVariance.name]
+    assert latest["origin_date"] == end
+    assert baseline["training_range"][-1] == end and baseline["training_records"] == 20
+    assert "target_date" not in baseline and baseline["stddev"] > 0
     assert len(exp["rows"])==120 and exp["status"] in ["completed","completed_with_failures"]
     for row in exp["rows"]:
         assert row["predictions"][RollingVariance.name]["status"]=="ok"

@@ -68,14 +68,19 @@ class _OneStepModel:
     def __init__(self):
         self._state = None
 
-    def predict(self, target_date):
+    def estimate(self):
+        """返回下一条观测的估计，调用者可在已知目标日时另行附上日期。"""
         if self._state is None:
             raise ForecastModelError("模型尚未成功拟合", "not_fitted")
+        return deepcopy(self._state)
+
+    def predict(self, target_date):
+        estimate = self.estimate()
         target = _date(target_date)
-        if target <= pd.Timestamp(self._state["origin_date"]):
+        if target <= pd.Timestamp(estimate["origin_date"]):
             raise ForecastModelError("目标日期必须晚于拟合起点", "invalid_target")
         # target_date只是调用者提供的下一有效观测标签，不自动推断交易日历。
-        return {**deepcopy(self._state), "target_date": target.strftime("%Y-%m-%d")}
+        return {**estimate, "target_date": target.strftime("%Y-%m-%d")}
 
     def fit_predict(self, returns, origin_date, target_date):
         return self.fit(returns, origin_date).predict(target_date)

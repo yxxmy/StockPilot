@@ -39,7 +39,7 @@ def app():
 def submit(at):
     at.date_input(key="start").set_value(date(2024, 1, 1))
     at.date_input(key="end").set_value(date(2024, 6, 30))
-    return at.button[0].click().run()
+    return next(button for button in at.sidebar.button if button.label == "开始分析").click().run()
 
 
 def test_initial_page_no_analysis_or_db(graph):
@@ -50,6 +50,69 @@ def test_initial_page_no_analysis_or_db(graph):
     assert len(at.tabs) == 4
 
 
+def test_submit_stock_name_then_code_reuses_same_analysis(graph, monkeypatch):
+    directory = Mock(return_value=[("平安银行", "000001")])
+    monkeypatch.setattr(service, "load_a_share_names", directory)
+    at = app()
+    directory.assert_not_called()
+    at.text_input(key="symbol").set_value(" 平安银行 ")
+    submit(at)
+    assert not at.error and not at.exception
+    first = at.session_state["result"]
+    assert first["symbol"] == "000001" and "平安银行（000001）" == at.session_state["last_attempt"]["symbol"]
+    at.text_input(key="symbol").set_value("000001")
+    submit(at)
+    assert at.session_state["result"]["report_id"] == first["report_id"]
+    assert len(ReportStore().list_reports()) == 1
+    directory.assert_called_once()
+    graph.assert_called_once()
+
+
+@pytest.mark.parametrize(("query", "message"), [("相同简称", "候选"), ("相同", "候选"), ("不存在", "未找到")])
+def test_unresolved_name_stops_before_analysis(graph, monkeypatch, query, message):
+    directory = Mock(return_value=[("相同简称", "000001"), ("相同简称", "600001")])
+    monkeypatch.setattr(service, "load_a_share_names", directory)
+    at = app()
+    at.text_input(key="symbol").set_value(query)
+    at.selectbox(key="mode").select("DeepSeek")
+    submit(at)
+    assert not at.exception and message in at.error[0].value
+    if message == "候选":
+        assert all(code in at.error[0].value for code in ("000001", "600001"))
+    at.run()
+    directory.assert_called_once()
+    graph.assert_not_called()
+    assert not Path(os.environ["STOCKPILOT_DB_PATH"]).exists()
+
+
+def test_directory_failure_allows_direct_code(graph, monkeypatch):
+    import requests
+
+    get = Mock(side_effect=requests.Timeout("private technical details"))
+    monkeypatch.setattr("tools.stock_names.requests.get", get)
+    at = app()
+    at.text_input(key="symbol").set_value("平安银行")
+    submit(at)
+    assert "巨潮资讯" in at.error[0].value and "private" not in at.error[0].value
+    graph.assert_not_called()
+    at.text_input(key="symbol").set_value("000001")
+    submit(at)
+    assert not at.error and at.session_state["result"]["symbol"] == "000001"
+    graph.assert_called_once()
+    get.assert_called_once()
+
+
+def test_directory_keeps_distinct_a_shares_and_leading_zeros(monkeypatch):
+    from tools.stock_names import load_a_share_names
+
+    stock = {"category": "A股", "zwjc": "仅测试", "code": "000001"}
+    response = Mock()
+    response.json.return_value = {"stockList": [stock, stock, dict(stock, category="B股", code="200001"),
+                                               dict(stock, code="1"), dict(stock, code="600001")]}
+    monkeypatch.setattr("tools.stock_names.requests.get", Mock(return_value=response))
+    assert load_a_share_names() == [("仅测试", "000001"), ("仅测试", "600001")]
+
+
 def test_local_submit_rerun_and_duplicate_click_single_save(graph):
     at = submit(app())
     assert not at.exception and not at.error
@@ -58,11 +121,15 @@ def test_local_submit_rerun_and_duplicate_click_single_save(graph):
     saved = at.session_state["result"]
     assert saved["trace"] == ["supervisor -> market", "market", "supervisor -> risk", "risk",
                                "supervisor -> report", "report", "supervisor -> end"]
-    assert len(at.get("plotly_chart")) == 1
-    assert len(at.metric) == 3
+    market_tab, report_tab = at.tabs[:2]
+    assert len(market_tab.get("plotly_chart")) == len(report_tab.get("plotly_chart")) == 1
+    assert len(market_tab.metric) == 3
+    assert [item.value for item in report_tab.metric] == ["11.00 元", "100 手", "0.00%"]
+    trace = next(item for item in report_tab.expander if item.label == "查看实际执行轨迹")
+    assert not trace.proto.expanded and "supervisor -> market" in trace.text[0].value
     at.run()
     at.text_input(key="history_symbol").set_value("600519").run()
-    at.button[0].click().run()
+    submit(at)
     assert graph.call_count == 1
     assert len(ReportStore().list_reports()) == 1
     assert at.session_state["result"]["report_id"] == saved["report_id"]
@@ -81,7 +148,7 @@ def test_deepseek_only_explicit_submit_and_cache(graph, monkeypatch):
     assert not at.exception and not at.error, [item.value for item in at.error]
     assert client.describe.call_count == 3
     at.run()
-    at.button[0].click().run()
+    submit(at)
     assert client.describe.call_count == 3 and factory.call_count == 1
     assert len(ReportStore().list_reports()) == 1
 
@@ -151,7 +218,15 @@ def test_history_read_only_and_no_analysis(graph):
     path = Path(os.environ["STOCKPILOT_DB_PATH"])
     original = path.read_bytes()
     at = app()
-    assert not at.exception and any(state["result"]["report"] == item.value for item in at.text)
+    from agents.report_text import EVIDENCE_DIVIDER
+    body, evidence = state["result"]["report"].split(EVIDENCE_DIVIDER)
+    assert not at.exception and any(body == item.value for item in at.text)
+    history = at.tabs[3]
+    assert [item.value for item in history.metric] == ["11.00 元", "100 手", "0.00%"]
+    assert not history.get("plotly_chart")
+    appendix = next(item for item in history.expander if item.label == "查看原始数据（核对用）")
+    assert not appendix.proto.expanded
+    assert any(evidence == item.value for item in appendix.text)
     at.selectbox(key="report_id").select(state["result"]["report_id"]).run()
     graph.assert_called_once()
     assert path.read_bytes() == original
@@ -161,6 +236,76 @@ def test_history_corrupt_db_friendly(monkeypatch):
     Path(os.environ["STOCKPILOT_DB_PATH"]).write_bytes(b"not sqlite")
     at = app()
     assert not at.exception and any("历史报告暂时无法读取" in item.value for item in at.error)
+
+
+def test_legacy_report_visible_in_cached_result_and_history(graph, monkeypatch):
+    import json
+    from agents.report_text import EVIDENCE_DIVIDER
+
+    at = submit(app())
+    saved = at.session_state["result"]
+    legacy_facts = json.loads(saved["report"].split(EVIDENCE_DIVIDER)[1])
+    legacy_facts["market"].pop("source")
+    evidence = json.dumps(legacy_facts, ensure_ascii=False)
+    legacy = ("StockPilot 600519\n本地规则输出（未调用大模型）\n\n事实数据：\n" + evidence
+              + "\n\nMarket Agent：\n本地规则：行情和指标已计算，数值见 market_facts。"
+              + "\n\nReport Agent：\n测试说明 [R1]")
+    saved["report"] = legacy
+    monkeypatch.setattr(service, "read_report", lambda report_id: {"report": legacy})
+    at.run()
+    assert not at.exception
+    for tab in (at.tabs[1], at.tabs[3]):
+        assert tab.metric[0].value == "11.00 元"
+        full_report = next(item for item in tab.expander if item.label == "查看完整报告")
+        assert not full_report.proto.expanded
+        visible_body = full_report.text[0].value
+        assert "11.00 元" in visible_body and "测试说明 [R1]" in visible_body
+        assert "报告未记录行情来源" in visible_body
+        assert '"market"' not in visible_body and "market_facts" not in visible_body
+        appendix = next(item for item in tab.expander if item.label == "查看原始数据（核对用）")
+        assert not appendix.proto.expanded and appendix.text[0].value == evidence
+    graph.assert_called_once()
+
+
+def test_incomplete_legacy_report_preserves_original_in_details():
+    from agents.report_text import report_for_display
+
+    value = 'StockPilot 600519\n\n事实数据：\n{"market": {}}'
+    body, details = report_for_display(value)
+    assert "数据不完整" in body and "{" not in body and details == value
+
+
+def test_report_with_single_session_keeps_unavailable_data_visible(graph):
+    graph.return_value = graph.return_value.iloc[:1].copy()
+    at = submit(app())
+    assert not at.error and not at.exception
+    summary = at.tabs[1]
+    assert [item.value for item in summary.metric] == ["11.00 元", "100 手", "暂无数据"]
+    assert any("20 日均线暂缺" in item.value for item in summary.caption)
+    assert any("前 5 个交易日均量" in item.value for item in summary.caption)
+
+
+def test_report_loads_industry_only_on_click_and_offers_independent_downloads(graph, monkeypatch):
+    from ui import report_view
+    from tools.market_hotspots import PERIOD_RETURNS
+
+    end = pd.Timestamp(graph.return_value["date"].iloc[-1])
+    dates = list(pd.bdate_range(end=end, periods=21).date)
+    quotes = pd.DataFrame({"行业": ["白酒", "银行"], PERIOD_RETURNS[5]: [2.0, 1.0], PERIOD_RETURNS[20]: [3.0, 4.0]})
+    load = Mock(return_value={"dates": dates, "quotes": quotes})
+    monkeypatch.setattr(report_view, "industry_snapshot", load)
+    monkeypatch.setattr(report_view, "match_current_industry", lambda *_: None)
+    at = submit(app())
+    load.assert_not_called()
+    assert len(at.get("download_button")) == 2
+    at.button(key="load_report_industry_current").click().run()
+    select = next(item for item in at.selectbox if item.label == "对照行业")
+    at.selectbox(key=select.key).select("白酒").run()
+    assert not at.exception
+    assert any("+2.00% · 第 1 / 2 名" in item.value for item in at.tabs[1].text)
+    assert all("第 1 / 2 名" not in item.value for item in at.tabs[3].text)
+    load.assert_called_once_with(end.date(), {})
+    graph.assert_called_once()
 
 
 def test_secret_not_in_frontend_or_inputs(monkeypatch):

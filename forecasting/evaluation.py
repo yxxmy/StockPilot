@@ -58,7 +58,22 @@ def _summarise(rows):
     return summary
 
 
-def evaluate_snapshot(snapshot, *, model_factories=None):
+def _estimate_next(returns, factories):
+    origin = returns.date.iloc[-1]
+    history = history_at(returns, origin)
+    predictions = {}
+    for name, factory in factories.items():
+        try:
+            predictions[name] = factory().fit(history.copy(), origin).estimate()
+        except ForecastModelError as exc:
+            category = exc.category if exc.category in ERROR_CATEGORIES else "model_error"
+            predictions[name] = {"status": "error", "category": category}
+        except Exception:
+            predictions[name] = {"status": "error", "category": "model_error"}
+    return {"origin_date": origin.strftime("%Y-%m-%d"), "predictions": predictions}
+
+
+def evaluate_snapshot(snapshot, *, model_factories=None, include_latest=False):
     """固定模型、不调参；测试可替换模型边界验证失败和时间约束。"""
     started=monotonic()
     prepared=prepare_targets(snapshot)
@@ -103,12 +118,16 @@ def evaluate_snapshot(snapshot, *, model_factories=None):
     metadata=json.loads(_json(snapshot["body"]["metadata"]))
     successes=sum(p["status"]=="ok" for r in rows for p in r["predictions"].values())
     status="completed" if successes==2*len(rows) else "completed_with_failures" if successes else "failed"
-    return {"schema_version":1,"status":status,"run_id":str(uuid4()),"created_at":datetime.now(timezone.utc).isoformat(),
+    experiment = {"schema_version":1,"status":status,"run_id":str(uuid4()),"created_at":datetime.now(timezone.utc).isoformat(),
         "snapshot_id":snapshot["snapshot_id"],"data_metadata":metadata,"config":config,"locked_config_hash":locked_hash,
         "protocol":"验证60条后按相同固定设定评估测试60条；未调参，测试误差不参与模型选择。后续窗口可使用当时已实现的先前收益。",
         "versions":{p:version(p) for p in ["arch","numpy","pandas","scipy"]},
         "rows":rows,"summary":_summarise(rows),"elapsed_seconds":round(monotonic()-started,3),
         "limitation":prepared["limitation"]+" 固定供应商快照不等于历史时点数据；60个测试点不足以证明稳定优势，不评估交易收益。所有成功日期指标与共同成功日期指标分开，不隐藏失败。"}
+    if include_latest:
+        experiment["next_observation"] = _estimate_next(prepared["returns"], factories)
+        experiment["elapsed_seconds"] = monotonic() - started
+    return experiment
 
 
 def experiment_figure(experiment):

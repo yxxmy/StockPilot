@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 import main
+from agents.report_text import report_for_display, EVIDENCE_DIVIDER
 from agents.workflow import build_graph
 from agents.deepseek import AgentError
 from tools import research_data as rd
@@ -33,11 +34,26 @@ def test_research_local_order_and_state():
     assert result["risk_facts"]["research_context"]["financial"] == result["financial_facts"]
     assert result["risk_facts"]["research_context"]["news"] == result["news_facts"]
     text = result["report"]
-    assert "Financial Agent" in text and "News Agent" in text
+    assert "Financial Agent" not in text and "News Agent" not in text
+    assert "未生成模型解读" not in text
     assert "未获取财务、公告、新闻" not in text
     parsed, _ = json.JSONDecoder().raw_decode(text.split("事实数据：\n")[1])
     assert parsed["financial"] == result["financial_facts"]
     assert parsed["news"] == result["news_facts"]
+
+
+@pytest.mark.parametrize("legacy", [True, False])
+def test_saved_research_status_hidden_without_losing_commentary_or_evidence(legacy):
+    new_text = graph().invoke(state())["report"]
+    body, evidence = new_text.split(EVIDENCE_DIVIDER)
+    tail = ("\n\nFinancial Agent：\n财务数据状态：ok；4条记录，未生成模型解读。"
+            "\n\nNews Agent：\n新闻状态：ok；公告状态：ok；未生成模型解读，空结果不代表无事件。"
+            "\n\nNews Agent：\n测试公告提及股东大会 [R1]")
+    saved = ("StockPilot 600519\n\n事实数据：\n" + evidence + tail
+             if legacy else body + tail + EVIDENCE_DIVIDER + evidence)
+    visible, details = report_for_display(saved)
+    assert "未生成模型解读" not in visible and "Financial Agent" not in visible
+    assert "测试公告提及股东大会 [R1]" in visible and details == evidence
 
 
 def test_five_agents_share_research_with_report():
@@ -49,6 +65,7 @@ def test_five_agents_share_research_with_report():
     facts = calls[-1].args[1]
     assert facts["financial_commentary"] == "财务测试"
     assert facts["news_commentary"] == "新闻测试"
+    assert "财务解读\n财务测试" in result["report"] and "新闻与公告解读\n新闻测试" in result["report"]
     assert facts["financial"] == result["financial_facts"]
     assert facts["news"] == result["news_facts"]
 
@@ -64,7 +81,8 @@ def test_all_research_unavailable_skips_two_model_calls():
     assert result["news_facts"]["notices"]["status"] == "error"
     assert [call.args[0] for call in client.describe.call_args_list] == ["Market Agent", "Risk Agent", "Report Agent"]
     assert '"status": "error"' in result["report"]
-    assert "空结果不代表无事件" in result["report"]
+    assert "未生成模型解读" not in result["report"]
+    assert "财务解读\n" not in result["report"] and "新闻与公告解读\n" not in result["report"]
 
 
 def test_news_failure_keeps_real_notice_material():
@@ -115,7 +133,9 @@ def test_full_research_cli(monkeypatch, capsys, mode, calls):
     assert main.main(["600519", "--start-date", "20240101", "--end-date", "20240630", mode, "--research"]) == 0
     output = capsys.readouterr()
     assert output.err == ""
-    assert "Financial Agent" in output.out and "News Agent" in output.out
+    assert ("财务解读\n" in output.out) == bool(calls)
+    assert ("新闻与公告解读\n" in output.out) == bool(calls)
+    assert "未生成模型解读" not in output.out
     assert "research-test-key" not in output.out
     assert post.call_count == calls
 

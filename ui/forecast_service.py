@@ -40,10 +40,10 @@ def acquire(session,symbol,start,end,source,refresh=False):
 def run_once(session,snapshot,force=False):
     key=(snapshot["snapshot_id"],sha256(json.dumps(CONFIG,sort_keys=True).encode()).hexdigest())
     cached=session.setdefault("forecast_completed",{})
-    if not force and key in cached:
+    if not force and key in cached and "next_observation" in cached[key]["experiment"]:
         session["forecast_result"]=cached[key]
         return False
-    result=evaluate_snapshot(snapshot)
+    result=evaluate_snapshot(snapshot, include_latest=True)
     destination=save_experiment(result,data_root()/"experiments")
     bundle={"experiment":result,"directory":str(destination)}
     session["forecast_result"]=bundle

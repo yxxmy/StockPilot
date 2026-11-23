@@ -10,6 +10,7 @@ import pandas as pd
 from langgraph.graph import END, START, StateGraph
 
 from agents.deepseek import AgentError, DeepSeekClient
+from agents.report_text import EVIDENCE_DIVIDER, market_and_risk_text
 from tools.indicators import calculate_indicators
 from tools.stock_data import EmptyDataError, StockDataError, get_stock_history
 from tools.research_data import get_stock_financials, get_stock_news, get_stock_notices
@@ -45,14 +46,14 @@ class StockState(TypedDict, total=False):
 
 LIMITATIONS = (
     "仅分析查询范围内的历史日线，来源 AKShare / 东方财富，不复权，成交量单位为手。"
-    "预热不足的指标为 null；除权除息可能造成机械跳空。"
+    "历史数据不足时，相关指标留空；除权除息可能造成价格跳空。"
     "未获取财务、公告、新闻或持仓，不能评估完整投资风险；不是收益预测或买卖建议。"
 )
 
 RESEARCH_LIMITATIONS = (
-    "仅分析查询范围内的不复权历史日线，成交量单位为手；指标预热不足为null。"
+    "仅分析查询范围内的不复权历史日线，成交量单位为手；历史数据不足时，相关指标留空。"
     "财务只选截止日已披露记录，但上游可能事后修订，不是严格时点回测数据。"
-    "新闻仅近期有限搜索结果，公告仅标题/链接，未读取全文；缺失或失败见各数据源status。"
+    "新闻仅覆盖近期有限搜索结果，公告列表仅含标题及链接；缺失或失败见各数据源说明。"
     "未获取持仓，不能评估完整投资风险；不是收益预测或买卖建议。"
 )
 
@@ -162,8 +163,7 @@ def build_graph(client=None, history_loader=get_stock_history, *, include_resear
     def financial(state: StockState):
         facts = load_optional(financial_loader or get_stock_financials, state["symbol"], state["end_date"])
         try:
-            summary = (client.describe("Financial Agent", facts) if client and facts["records"]
-                       else f"财务数据状态：{facts['status']}；{len(facts['records'])}条记录，未生成模型解读。")
+            summary = client.describe("Financial Agent", facts) if client and facts["records"] else ""
             return {"financial_facts": facts, "financial_summary": summary, "trace": ["financial"]}
         except AgentError as exc:
             return failed("financial", "Financial", exc)
@@ -176,8 +176,7 @@ def build_graph(client=None, history_loader=get_stock_history, *, include_resear
                  "limitations": RESEARCH_LIMITATIONS}
         try:
             has_records = facts["news"]["records"] or facts["notices"]["records"]
-            summary = (client.describe("News Agent", facts) if client and has_records
-                       else f"新闻状态：{facts['news']['status']}；公告状态：{facts['notices']['status']}；未生成模型解读，空结果不代表无事件。")
+            summary = client.describe("News Agent", facts) if client and has_records else ""
             return {"news_facts": facts, "news_summary": summary, "trace": ["news"]}
         except AgentError as exc:
             return failed("news", "News", exc)
@@ -222,22 +221,27 @@ def build_graph(client=None, history_loader=get_stock_history, *, include_resear
             facts.update(financial=state["financial_facts"], news=state["news_facts"],
                          financial_commentary=state["financial_summary"], news_commentary=state["news_summary"])
             evidence.update(financial=facts["financial"], news=facts["news"])
-            research_text = f"\n\nFinancial Agent：\n{state['financial_summary']}\n\nNews Agent：\n{state['news_summary']}"
+            for title, summary in (("财务解读", state["financial_summary"]), ("新闻与公告解读", state["news_summary"])):
+                if summary:
+                    research_text += f"\n\n{title}\n{summary}"
         try:
             if "rag_facts" in state and state["rag_facts"]["status"] != "ok":
                 # 没有可用原文时不让模型凭知识补答正文，保留已有行情/风险结果。
                 summary = "正文问题没有可用原文，无法回答。" + state["rag_facts"]["message"]
             else:
-                summary = client.describe("Report Agent", facts) if client else "本地规则报告：仅展示已计算事实，不生成模型解读。"
+                summary = client.describe("Report Agent", facts) if client else ""
             # 数值证据由代码直接输出；模型解读独立标注，不能覆盖事实。
             label = "DeepSeek 模型解读（需核对事实）" if client else "本地规则输出（未调用大模型）"
-            text = (f"StockPilot {state['symbol']}\n{label}\n\n事实数据：\n"
-                    + json.dumps(evidence, ensure_ascii=False, indent=2, allow_nan=False)
-                    + f"\n\nMarket Agent：\n{state['market_summary']}"
-                    + research_text
-                    + f"\n\nRisk Agent：\n{state['risk_summary']}"
-                    + retrieval_text
-                    + f"\n\nReport Agent：\n{summary}\n\n{limitations}")
+            text = (f"{state['symbol']} 行情分析｜截至 {facts['market']['actual_range'][1]}\n{label}\n\n"
+                    + market_and_risk_text(facts["market"], facts["risk"]))
+            if client:
+                text += f"\n\n模型行情解读\n{state['market_summary']}\n\n模型风险解读\n{state['risk_summary']}"
+            text += research_text + retrieval_text
+            if summary:
+                text += "\n\n综合说明\n" + summary
+            text += "\n\n数据使用说明\n" + limitations
+            # 完整证据随报告保存，页面默认只呈现上面的中文正文。
+            text += EVIDENCE_DIVIDER + json.dumps(evidence, ensure_ascii=False, indent=2, allow_nan=False)
             return {"report": text, "trace": ["report"]}
         except (ValueError, AgentError) as exc:
             return failed("report", "Report", exc)

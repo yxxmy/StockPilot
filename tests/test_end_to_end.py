@@ -19,6 +19,7 @@ import requests
 from streamlit.testing.v1 import AppTest
 
 from memory import ReportStore
+from agents.report_text import EVIDENCE_DIVIDER
 from rag.embedding import LocalEmbedder
 from rag.index import DocumentIndex
 from tools import research_data as rd
@@ -128,7 +129,7 @@ def submit(at, symbol="600519"):
     at.selectbox(key="mode").select("DeepSeek")
     at.checkbox(key="research").check()
     at.text_area(key="question").set_value(QUESTION)
-    return at.button[0].click().run()
+    return next(button for button in at.sidebar.button if button.label == "开始分析").click().run()
 
 
 def check_saved(at, system, symbol="600519"):
@@ -170,15 +171,29 @@ def test_complete_ui_to_history_with_real_bge(system):
     state, record = check_saved(at, system)
     check_evidence(state, system)
     assert system.post.call_count == 5 and system.market.call_count == 1
-    assert len(at.get("plotly_chart")) == 1
+    assert len(at.get("plotly_chart")) == 2
+    brief = at.tabs[1]
+    assert "近期事件" in [item.value for item in brief.subheader]
+    assert {"https://example.invalid/test-notice", "https://example.invalid/test-news"}.issubset(
+        {item.proto.url for item in brief.get("link_button")}
+    )
+    assert any("接下来核对" in item.value for item in brief.text)
+    pdf = next(item for item in brief.expander if item.label == "核对本地 PDF 原文")
+    assert any("物理第" in item.value and "[R1]" in item.value for item in pdf.text)
     at.run()
-    at.button[0].click().run()
+    next(button for button in at.sidebar.button if button.label == "开始分析").click().run()
     assert system.post.call_count == 5 and len(ReportStore(system.db).list_reports()) == 1
     # 新会话从SQLite读回，不能只证明页面显示了内存缓存。
     history = app()
     history.text_input(key="history_symbol").set_value("600519").run()
     history.selectbox(key="report_id").select(record["id"]).run()
-    assert any(item.value == record["report"] for item in history.text)
+    body, evidence = record["report"].split(EVIDENCE_DIVIDER)
+    assert any(item.value == body for item in history.text)
+    appendix = next(item for item in history.expander if item.label == "查看原始数据（核对用）")
+    assert any(item.value == evidence for item in appendix.text)
+    assert {item.proto.url for item in history.tabs[3].get("link_button")} == {
+        item.proto.url for item in brief.get("link_button")
+    }
     assert system.market.call_count == 1 and system.post.call_count == 5
     system.corpus.cases.append({"scenario": "complete_ui_history", "rag_status": "ok", "mock_model_calls": 5,
         "hit_document_ids": sorted({h["document_id"] for h in state["rag_facts"]["records"]}), "report_roundtrip": True})
@@ -201,7 +216,10 @@ def test_two_stocks_no_document_or_history_crosstalk(system):
         assert len(options) == 1
         history.selectbox(key="report_id").select(report_id).run()
         saved = ReportStore(system.db).get_report(report_id)
-        assert any(item.value == saved["report"] for item in history.text)
+        body, evidence = saved["report"].split(EVIDENCE_DIVIDER)
+        assert any(item.value == body for item in history.text)
+        appendix = next(item for item in history.expander if item.label == "查看原始数据（核对用）")
+        assert any(item.value == evidence for item in appendix.text)
     assert system.post.call_count == 10 and system.market.call_count == 2
     system.corpus.cases.append({"scenario": "two_stock_isolation", "symbols": ["600519", "000001"],
                                "distinct_reports": True, "mock_model_calls": 10})

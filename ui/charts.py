@@ -3,6 +3,25 @@
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+_AVERAGES = [("ma5", "#d97706"), ("ma10", "#2563eb"), ("ma20", "#7c3aed")]
+
+
+def report_trend_chart(data):
+    fig = go.Figure()
+    fig.add_scatter(
+        x=data["date"], y=data["close"], name="收盘价",
+        mode="lines+markers" if len(data) == 1 else "lines", line={"color": "#0f766e", "width": 2},
+    )
+    for name, color in _AVERAGES:
+        if name in data and data[name].notna().any():
+            fig.add_scatter(x=data["date"], y=data[name], name=name.upper(), mode="lines",
+                            line={"color": color, "width": 1.4})
+    fig.update_layout(
+        height=300, template="plotly_white", yaxis_title="价格（元）", hovermode="x unified",
+        margin={"l": 16, "r": 16, "t": 26, "b": 16}, legend={"orientation": "h", "y": 1.12},
+    )
+    return fig
+
 
 def market_chart(data):
     fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.045,
@@ -10,7 +29,7 @@ def market_chart(data):
     dates = data["date"]
     fig.add_trace(go.Candlestick(x=dates, open=data["open"], high=data["high"], low=data["low"], close=data["close"],
         name="日K", increasing_line_color="#dc2626", decreasing_line_color="#059669"), row=1, col=1)
-    for name, color in [("ma5", "#d97706"), ("ma10", "#2563eb"), ("ma20", "#7c3aed")]:
+    for name, color in _AVERAGES:
         fig.add_trace(go.Scatter(x=dates, y=data[name], name=name.upper(), line={"color": color, "width": 1.5}), row=1, col=1)
     colors = ["#dc2626" if close >= opening else "#059669" for close, opening in zip(data["close"], data["open"])]
     fig.add_trace(go.Bar(x=dates, y=data["volume"], name="成交量", marker_color=colors), row=2, col=1)

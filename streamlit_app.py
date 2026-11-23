@@ -6,6 +6,7 @@ from uuid import uuid4
 import streamlit as st
 
 from agents.deepseek import AgentError
+from ui.report_view import show_report
 from memory import MemoryStoreError
 from ui import service
 from ui.charts import market_chart
@@ -21,11 +22,15 @@ def render():
     st.set_page_config(page_title="StockPilot · 股票分析", page_icon="📈", layout="wide")
     st.title("StockPilot")
     st.caption("A股研究工作台 · 真实数据 · 可追溯分析")
-    st.sidebar.page_link("pages/1_时序预测实验.py",label="📉 时序预测实验（独立）")
+    stock_from_market = st.session_state.pop("stock_from_market", None)
+    if stock_from_market:
+        st.session_state["symbol"] = stock_from_market
+    st.session_state.setdefault("symbol", "600519")
     with st.sidebar:
         st.subheader("分析设置")
         with st.form("analysis", enter_to_submit=False):
-            symbol = st.text_input("股票代码", "600519", key="symbol", max_chars=6)
+            stock_query = st.text_input("股票代码或名称", value=None, key="symbol", max_chars=60,
+                help="输入六位 A 股代码或股票简称，例如 600519 或 贵州茅台。输入部分简称可查看候选。")
             start = st.date_input("开始日期", date.today() - timedelta(days=365), key="start")
             end = st.date_input("结束日期", date.today(), key="end")
             mode = st.selectbox("分析模式", ["本地规则", "DeepSeek"], key="mode")
@@ -37,13 +42,15 @@ def render():
     if submitted:
         # 每次显式提交有独立标识；rerun只展示，不创建新请求。
         attempt = {"id": uuid4().hex[:8], "time": datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S"),
-            "symbol": symbol, "mode": mode, "status": "执行中"}
+            "symbol": stock_query, "mode": mode, "status": "执行中"}
         st.session_state["last_attempt"] = attempt
         started = monotonic()
         st.session_state.pop("analysis_error", None)
         st.session_state.pop("failure_diagnostic", None)
         try:
-            with st.spinner(f"任务 {attempt['id']}：正在获取真实数据并执行工作流，请等待…"):
+            with st.spinner(f"任务 {attempt['id']}：正在查询股票并准备分析，请等待…"):
+                symbol, name = service.resolve_stock(st.session_state, stock_query)
+                attempt["symbol"] = f"{name}（{symbol}）" if name else symbol
                 fresh = service.analyze_once(st.session_state, symbol, start.isoformat(), end.isoformat(), mode, research, question)
             if not fresh:
                 st.info("已复用本会话相同参数的成功结果，没有重复请求或保存。")
@@ -95,10 +102,10 @@ def render():
             st.info("请填写参数并点击“开始分析”，当前没有加载行情。")
     with report:
         if result:
-            st.success("工作流已完成，报告已保存。ID：" + result["report_id"])
-            st.subheader("实际执行轨迹")
-            external_text("\n".join(f"{i}. {step}" for i, step in enumerate(result.get("trace", []), 1)))
-            st.caption("仅显示工作流实际返回的trace；未启用的Financial、News或RAG节点不会显示为已执行。")
+            show_report(result["report"], result=result, scope="current")
+            with st.expander("查看实际执行轨迹"):
+                st.caption("已保存报告 · " + result["report_id"])
+                external_text("\n".join(f"{i}. {step}" for i, step in enumerate(result.get("trace", []), 1)))
             sources = [("财务", result.get("financial_facts"))]
             sources += [(label, result.get("news_facts", {}).get(key)) for label, key in [("新闻", "news"), ("公告", "notices")]]
             for label, source in sources:
@@ -108,8 +115,6 @@ def render():
                 if name in result:
                     with st.expander(name + " · 来源、状态与缺失说明"):
                         external_text(result[name])
-            st.subheader("分析报告")
-            external_text(result["report"])
         else:
             st.info("分析完成后展示报告与真实执行轨迹。")
     with rag:
@@ -142,7 +147,7 @@ def render():
                     chosen = st.selectbox("查看完整历史报告", list(labels), format_func=labels.get, key="report_id")
                     saved = service.read_report(chosen)
                     if saved:
-                        external_text(saved["report"])
+                        show_report(saved["report"], scope="history")
                     else:
                         st.warning("该报告已不存在，请刷新历史列表。")
         except Exception:
