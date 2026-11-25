@@ -13,6 +13,32 @@ from tools.stock_data import _parse_date
 from tools.stock_names import load_a_share_names
 
 
+def _stock_directory(session):
+    cached = session.get("stock_name_directory")
+    if cached is not None and monotonic() - cached[0] < 3600:
+        return cached[1]
+    try:
+        directory = load_a_share_names()
+    except ValueError:
+        session["stock_name_directory_failed_at"] = monotonic()
+        raise
+    session["stock_name_directory"] = (monotonic(), directory)
+    session.pop("stock_name_directory_failed_at", None)
+    return directory
+
+
+def stock_display_name(session, symbol):
+    """按代码核对展示用简称，名录故障时允许继续展示行情。"""
+    failed_at = session.get("stock_name_directory_failed_at")
+    if failed_at is not None and monotonic() - failed_at < 60:
+        return ""
+    try:
+        names = {name for name, code in _stock_directory(session) if code == symbol}
+    except ValueError:
+        return ""
+    return names.pop() if len(names) == 1 else ""
+
+
 def resolve_stock(session, query):
     """代码直接使用；名称必须唯一且完整匹配，避免把分析提交给相似股票。"""
     query = normalize("NFKC", query).strip()
@@ -21,13 +47,7 @@ def resolve_stock(session, query):
     if not query or query.isdecimal():
         raise ValueError("请输入六位股票代码或完整股票简称。")
 
-    # 只在按名称提交时取名录，成功后在本会话复用一小时。
-    cached = session.get("stock_name_directory")
-    if cached is None or monotonic() - cached[0] >= 3600:
-        directory = load_a_share_names()
-        session["stock_name_directory"] = (monotonic(), directory)
-    else:
-        directory = cached[1]
+    directory = _stock_directory(session)
     keyword = query.casefold()
     exact, partial = [], []
     for name, code in directory:

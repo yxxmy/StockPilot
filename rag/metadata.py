@@ -7,6 +7,14 @@ import re
 FIELDS = ("symbol", "company_name", "report_year", "document_type", "disclosure_date")
 
 
+def verified_pdf_url(value):
+    if isinstance(value, str) and re.fullmatch(
+        r"https://static\.cninfo\.com\.cn/finalpage/[0-9]{4}-[0-9]{2}-[0-9]{2}/[A-Za-z0-9_-]+\.[Pp][Dd][Ff]", value
+    ):
+        return value
+    return None
+
+
 def normalize_metadata(value=None):
     if value is None:
         value = {}

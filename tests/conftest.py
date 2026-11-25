@@ -1,5 +1,7 @@
 """所有单元测试默认禁止真实接口调用。"""
 
+from unittest.mock import Mock
+
 import pytest
 import requests
 
@@ -20,4 +22,13 @@ def block_live_api(monkeypatch, tmp_path):
     monkeypatch.setattr(stock_data.ak, "stock_zh_a_hist_tx", unavailable_backup)
     for name in ["stock_financial_analysis_indicator_em", "stock_news_em", "stock_zh_a_disclosure_report_cninfo"]:
         monkeypatch.setattr(stock_data.ak, name, blocked)
-    monkeypatch.setattr(requests.sessions.Session, "request", blocked)
+    def offline_request(session, method, url, **kwargs):
+        if method.upper() == "GET" and url == "https://www.cninfo.com.cn/new/data/szse_stock.json":
+            response = Mock()
+            response.json.return_value = {"stockList": [
+                {"category": "A股", "code": "600519", "zwjc": "贵州茅台"},
+                {"category": "A股", "code": "000001", "zwjc": "平安银行"},
+            ]}
+            return response
+        return blocked(session, method, url, **kwargs)
+    monkeypatch.setattr(requests.sessions.Session, "request", offline_request)

@@ -13,7 +13,7 @@ import numpy as np
 from rag.embedding import LocalEmbedder, QUERY_PREFIX
 from rag.errors import EmbeddingError, IndexCorruptionError, RagError
 from rag.pdf import extract_pdf, validate_chunk_options
-from rag.metadata import normalize_metadata, metadata_status, search_filters, matches
+from rag.metadata import normalize_metadata, metadata_status, search_filters, matches, verified_pdf_url
 
 
 DEFAULT_INDEX_DIR = Path(__file__).resolve().parents[1] / "data" / "rag"
@@ -83,10 +83,13 @@ class DocumentIndex:
                     raise ValueError()
                 ids.add(chunk["chunk_id"])
                 info = normalize_metadata(chunk.get("metadata"))
+                url = chunk.get("official_pdf_url")
+                if url is not None and verified_pdf_url(url) is None:
+                    raise ValueError("公告 PDF 链接格式不合法")
                 identity = chunk["document_id"]
-                if identity in document_metadata and document_metadata[identity] != info:
+                if identity in document_metadata and document_metadata[identity] != (info, url):
                     raise ValueError("同一文档的元数据不一致")
-                document_metadata[identity] = info
+                document_metadata[identity] = (info, url)
                 # 旧快照仅在内存中补齐未知值，不迁移或改写磁盘文件。
                 normalized.append({**chunk, "metadata": info, "metadata_status": metadata_status(info)})
             index = faiss.deserialize_index(np.frombuffer(vector_bytes, dtype="uint8"))
@@ -134,17 +137,32 @@ class DocumentIndex:
         except OSError:
             raise RagError("索引保存失败，未切换有效快照") from None
 
-    def import_pdf(self, path, *, metadata=None):
+    def import_pdf(self, path, *, metadata=None, official_pdf_url=None):
         document = extract_pdf(path, self.chunk_size, self.overlap, metadata=metadata)
+        if official_pdf_url is not None and (verified_pdf_url(official_pdf_url) is None or not document["metadata"]["symbol"]):
+            raise ValueError("保存官方 PDF 链接时需要已核对的链接和股票代码")
         with self._writer():
             self.reload()  # 避免另一个实例刚导入的内容被旧内存覆盖。
-            if any(chunk["document_id"] == document["document_id"] for chunk in self.chunks):
-                existing = next(c for c in self.chunks if c["document_id"] == document["document_id"])
+            existing = next((chunk for chunk in self.chunks if chunk["document_id"] == document["document_id"]), None)
+            if existing:
                 if metadata is not None and existing["metadata"] != document["metadata"]:
                     raise ValueError("文档已存在且元数据不同，请核验后使用set-metadata显式补录或更正")
-                return {"document_id": document["document_id"], "chunks_added": 0, "duplicate": True, "warnings": document["warnings"],
-                        "metadata": dict(existing["metadata"]), "metadata_status": existing["metadata_status"]}
+                result = {"document_id": document["document_id"], "chunks_added": 0, "duplicate": True, "warnings": document["warnings"],
+                          "metadata": dict(existing["metadata"]), "metadata_status": existing["metadata_status"]}
+                if official_pdf_url and not existing.get("official_pdf_url"):
+                    # 同字节文件已在索引中，只补充出处并保留原文向量。
+                    chunks = [{**c, "official_pdf_url": official_pdf_url} if c["document_id"] == document["document_id"] else c
+                              for c in self.chunks]
+                    self._persist(self.index, chunks)
+                    self.chunks = chunks
+                    result["source_added"] = True
+                if url := existing.get("official_pdf_url") or official_pdf_url:
+                    result["official_pdf_url"] = url
+                return result
             additions = document["chunks"]
+            if official_pdf_url:
+                for chunk in additions:
+                    chunk["official_pdf_url"] = official_pdf_url
             vectors = _vectors(self.embedder.encode([chunk["text"] for chunk in additions]), len(additions),
                                self.index.d if self.index is not None else None)
             index = faiss.clone_index(self.index) if self.index is not None else faiss.IndexFlatIP(vectors.shape[1])
@@ -152,8 +170,11 @@ class DocumentIndex:
             chunks = self.chunks + additions
             self._persist(index, chunks)
             self.index, self.chunks = index, chunks
-        return {"document_id": document["document_id"], "chunks_added": len(additions), "duplicate": False, "warnings": document["warnings"],
-                "metadata": document["metadata"], "metadata_status": document["metadata_status"]}
+        result = {"document_id": document["document_id"], "chunks_added": len(additions), "duplicate": False, "warnings": document["warnings"],
+                  "metadata": document["metadata"], "metadata_status": document["metadata_status"]}
+        if official_pdf_url:
+            result["official_pdf_url"] = official_pdf_url
+        return result
 
     def update_metadata(self, document_id, metadata):
         """仅显式补录身份，向量/原文/页码不变；保留全部旧快照。"""
@@ -176,7 +197,24 @@ class DocumentIndex:
             self.chunks = chunks
         return {"document_id": document_id, "updated": True}
 
-    def search_documents(self, question, top_k=5, *, symbol=None, report_year=None, document_type=None):
+    def list_documents(self, *, symbol=None, report_year=None, document_type=None):
+        """每份匹配的 PDF 只列一次，不计算向量。"""
+        filters = search_filters(symbol, report_year, document_type)
+        documents = {}
+        for chunk in self.chunks:
+            identity = chunk["document_id"]
+            if identity not in documents and matches(chunk["metadata"], filters):
+                documents[identity] = {
+                    "document_id": identity,
+                    "document_name": chunk["document_name"],
+                    "metadata": dict(chunk["metadata"]),
+                }
+        return sorted(documents.values(), key=lambda doc: (
+            doc["metadata"]["report_year"] or 0, doc["metadata"]["disclosure_date"] or "", doc["document_name"],
+        ), reverse=True)
+
+    def search_documents(self, question, top_k=5, *, symbol=None, report_year=None, document_type=None,
+                         document_id=None):
         if not isinstance(question, str) or not question.strip():
             raise ValueError("问题不能为空")
         if isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= 100:
@@ -184,11 +222,13 @@ class DocumentIndex:
         filters = search_filters(symbol, report_year, document_type)
         if self.index is None:
             return []
-        candidates = [i for i, chunk in enumerate(self.chunks) if matches(chunk["metadata"], filters)]
+        candidates = [i for i, chunk in enumerate(self.chunks)
+                      if (document_id is None or chunk["document_id"] == document_id)
+                      and matches(chunk["metadata"], filters)]
         if not candidates:
             return []  # 不加载模型、不放宽股票/年份条件、不把未知归给请求股票。
         index = self.index
-        if filters:
+        if filters or document_id is not None:
             # 先从元数据确定候选，再对候选构建精确余弦索引，避免全库top_k后过滤漏召回。
             index = faiss.IndexFlatIP(self.index.d)
             index.add(np.stack([self.index.reconstruct(i) for i in candidates]))

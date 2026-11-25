@@ -1,11 +1,13 @@
 """运行：python -m streamlit run streamlit_app.py --server.address 127.0.0.1"""
 
 from datetime import date, timedelta, datetime, timezone
+from html import escape
 from time import monotonic
 from uuid import uuid4
 import streamlit as st
 
 from agents.deepseek import AgentError
+from ui.announcement_search import search_announcements, show_announcement_search, show_rag_facts
 from ui.report_view import show_report
 from memory import MemoryStoreError
 from ui import service
@@ -20,8 +22,9 @@ def external_text(value):
 
 def render():
     st.set_page_config(page_title="StockPilot · 股票分析", page_icon="📈", layout="wide")
-    st.title("StockPilot")
-    st.caption("A股研究工作台 · 真实数据 · 可追溯分析")
+    st.html('<style>[data-testid="stMainBlockContainer"] { padding-top: 3.75rem; }</style>')
+    st.markdown("**StockPilot**")
+    headline = st.empty()
     stock_from_market = st.session_state.pop("stock_from_market", None)
     if stock_from_market:
         st.session_state["symbol"] = stock_from_market
@@ -36,10 +39,17 @@ def render():
             mode = st.selectbox("分析模式", ["本地规则", "DeepSeek"], key="mode")
             research = st.checkbox("启用财务新闻研究", key="research")
             question = st.text_area("财报或公告正文问题（可选）", key="question", max_chars=500,
-                help="只有填写问题才启用RAG；使用已导入的本地PDF索引。")
-            submitted = st.form_submit_button("开始分析", type="primary")
+                help="例如：2023 年度分红的股权登记日是哪一天？点击「查询公告原文」即可查询。")
+            run_action, search_action = st.columns(2)
+            submitted = run_action.form_submit_button("开始分析", type="primary")
+            find_requested = search_action.form_submit_button("查找公告")
+            original_requested = st.form_submit_button("查询公告原文", width="stretch")
         st.caption("DeepSeek读取本机环境变量，可能产生费用。相同参数在当前会话复用成功结果；普通页面重跑不发起分析。")
+    if find_requested or original_requested:
+        search_announcements(stock_query, question, query_original=original_requested)
+        st.session_state["rag_tab_default"] = True
     if submitted:
+        st.session_state["rag_tab_default"] = False
         # 每次显式提交有独立标识；rerun只展示，不创建新请求。
         attempt = {"id": uuid4().hex[:8], "time": datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S"),
             "symbol": stock_query, "mode": mode, "status": "执行中"}
@@ -52,6 +62,8 @@ def render():
                 symbol, name = service.resolve_stock(st.session_state, stock_query)
                 attempt["symbol"] = f"{name}（{symbol}）" if name else symbol
                 fresh = service.analyze_once(st.session_state, symbol, start.isoformat(), end.isoformat(), mode, research, question)
+                completed = st.session_state["result"]
+                completed["stock_name"] = name or completed.get("stock_name") or service.stock_display_name(st.session_state, symbol)
             if not fresh:
                 st.info("已复用本会话相同参数的成功结果，没有重复请求或保存。")
         except ValueError as exc:
@@ -67,6 +79,15 @@ def render():
         finally:
             attempt["elapsed"] = round(monotonic() - started, 2)
             attempt["status"] = "失败" if st.session_state.get("analysis_error") else "完成" if fresh else "复用成功结果"
+    result = st.session_state.get("result")
+    stock_title = "个股分析"
+    if result:
+        symbol = result["symbol"]
+        if "stock_name" not in result:
+            result["stock_name"] = service.stock_display_name(st.session_state, symbol)
+        name = result["stock_name"]
+        stock_title = f"{name}（{symbol}）" if name else symbol
+    headline.html(f"<h1>{escape(service.public_text(stock_title))}</h1>")
     attempt = st.session_state.get("last_attempt")
     if attempt:
         st.caption(f"最近提交 {attempt['time']}（北京时间） · 任务 {attempt['id']} · {service.public_text(attempt['symbol'])} · {attempt['mode']} · {attempt['status']} · 耗时 {attempt.get('elapsed', 0):.2f} 秒")
@@ -81,10 +102,10 @@ def render():
                 st.caption("工作流已结束，失败发生于图外SQLite保存阶段；上述trace不是新的存储节点。")
         if st.session_state.get("result"):
             st.info("下方保留的是上一次成功分析，本次失败没有替换该结果。")
-    result = st.session_state.get("result")
     if result:
         st.caption(f"当前展示已完成分析：{result['symbol']} · 请求 {result['start_date']} 至 {result['end_date']}；与尚未提交的表单独立。")
-    market, report, rag, history = st.tabs(["行情与指标", "报告与执行轨迹", "RAG原文", "历史报告"])
+    market, report, rag, history = st.tabs(["行情与指标", "报告与执行轨迹", "RAG原文", "历史报告"],
+        default="RAG原文" if st.session_state.get("rag_tab_default") else "行情与指标")
     with market:
         if result:
             data = result["history"]
@@ -118,19 +139,17 @@ def render():
         else:
             st.info("分析完成后展示报告与真实执行轨迹。")
     with rag:
+        lookup = st.session_state.get("announcement_search", {})
+        lookup_active = st.session_state.get("rag_tab_default") and "question" in lookup
+        show_lookup = lookup and (lookup_active or "question" not in lookup)
+        if show_lookup:
+            show_announcement_search()
         facts = result.get("rag_facts") if result else None
-        if not facts:
-            st.info("本次未启用正文检索。填写财报或公告正文问题后提交分析即可启用。")
-        else:
-            external_text("问题：" + facts["question"])
-            external_text("检索状态：" + facts["status"] + " · " + facts.get("message", ""))
-            if facts["status"] != "ok":
-                st.warning("没有取得可用原文，不编造财报或公告内容。")
-            for hit in facts.get("records", []):
-                with st.expander(f"[{hit['ref_id']}] {service.public_text(hit['document_name'])} · 物理第{hit['page']}页 · {hit['score']:.3f}", expanded=True):
-                    external_text(hit["text"])
-                    st.caption("文档标识：" + hit["document_id"] + " · 片段：" + hit["chunk_id"])
-            external_text(facts.get("limitations", ""))
+        if not lookup_active and facts:
+            st.subheader("本地 PDF 原文")
+            show_rag_facts(facts)
+        elif not show_lookup:
+            st.info("填写股票和正文问题，点击「查询公告原文」。")
     with history:
         st.subheader("已保存的分析报告")
         filter_symbol = st.text_input("历史股票筛选（留空为全部）", key="history_symbol", max_chars=6)

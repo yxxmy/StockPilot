@@ -48,7 +48,7 @@ def _source_metadata(state):
         rag = state["rag_facts"]
         sources["rag"] = {key: rag[key] for key in ["question", "status", "message", "score_threshold", "limitations", "filters"] if key in rag}
         sources["rag"]["references"] = [{key: reference[key] for key in [
-            "ref_id", "document_id", "document_name", "page", "chunk_id", "score", "metadata", "metadata_status",
+            "ref_id", "document_id", "document_name", "page", "chunk_id", "score", "metadata", "metadata_status", "official_pdf_url",
         ] if key in reference} for reference in rag.get("sources", [])]
     return sources
 

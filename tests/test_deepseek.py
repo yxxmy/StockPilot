@@ -54,6 +54,18 @@ def test_official_endpoint_and_request_contract(client, monkeypatch):
     assert "禁止使用点号路径" in payload["messages"][0]["content"]
 
 
+def test_announcement_answer_accepts_only_known_section_citations(client, monkeypatch):
+    facts = {"rag": {"question": "这份公告怎么说？", "status": "ok",
+                     "records": [{"ref_id": "R1", "page": 1, "text": "公告原文"}]}}
+    good = {"summary": "原文给出了分配说明 [R1]。", "evidence": ["rag"], "citations": ["R1"]}
+    bad = {**good, "summary": "推测内容 [R2]。", "citations": ["R2"]}
+    post = Mock(side_effect=[response(json.dumps(good)), response(json.dumps(bad))])
+    monkeypatch.setattr(requests, "post", post)
+    assert client.describe("公告原文助手", facts) == good["summary"]
+    with pytest.raises(AgentError, match="正文引用校验失败"):
+        client.describe("公告原文助手", facts)
+
+
 @pytest.mark.parametrize("status", [301, 401, 402, 429, 500])
 def test_http_failure_no_secret_leak(client, monkeypatch, status):
     post = Mock(return_value=response("unit-test-key", status=status))

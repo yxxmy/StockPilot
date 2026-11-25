@@ -5,6 +5,7 @@ from math import isfinite
 
 import streamlit as st
 
+from rag.metadata import verified_pdf_url
 from tools.research_data import _url
 from tools.stock_data import DataValidationError
 from ui.service import public_text
@@ -163,6 +164,14 @@ def _show_document_references(rag, symbol):
                 disclosed = f" · 披露日 {date:%Y-%m-%d}" if date else ""
                 st.text(public_text(f"[{hit.get('ref_id', '')}] {hit.get('document_name', '')} · 物理第{hit['page']}页{disclosed}"))
                 st.text(public_text(hit["text"]))
+                show_official_pdf_link(hit)
+
+
+def show_official_pdf_link(hit):
+    url = verified_pdf_url(hit.get("official_pdf_url"))
+    if url:
+        page = hit["page"]
+        st.markdown(f"[打开官方 PDF · 第 {page} 页]({url}#page={page})")
 
 
 def show_event_highlights(facts, market, *, items):

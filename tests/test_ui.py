@@ -45,6 +45,8 @@ def submit(at):
 def test_initial_page_no_analysis_or_db(graph):
     at = app()
     assert not at.exception and not at.error
+    assert "**StockPilot**" in [item.value for item in at.markdown]
+    assert "<h1>个股分析</h1>" in [item.proto.body for item in at.get("html")]
     graph.assert_not_called()
     assert not Path(os.environ["STOCKPILOT_DB_PATH"]).exists()
     assert len(at.tabs) == 4
@@ -98,6 +100,7 @@ def test_directory_failure_allows_direct_code(graph, monkeypatch):
     at.text_input(key="symbol").set_value("000001")
     submit(at)
     assert not at.error and at.session_state["result"]["symbol"] == "000001"
+    assert "<h1>000001</h1>" in [item.proto.body for item in at.get("html")]
     graph.assert_called_once()
     get.assert_called_once()
 
@@ -119,6 +122,7 @@ def test_local_submit_rerun_and_duplicate_click_single_save(graph):
     graph.assert_called_once()
     graph.assert_called_with("600519", "20230101", "2024-06-30")
     saved = at.session_state["result"]
+    assert "<h1>贵州茅台（600519）</h1>" in [item.proto.body for item in at.get("html")]
     assert saved["trace"] == ["supervisor -> market", "market", "supervisor -> risk", "risk",
                                "supervisor -> report", "report", "supervisor -> end"]
     market_tab, report_tab = at.tabs[:2]
@@ -127,12 +131,25 @@ def test_local_submit_rerun_and_duplicate_click_single_save(graph):
     assert [item.value for item in report_tab.metric] == ["11.00 元", "100 手", "0.00%"]
     trace = next(item for item in report_tab.expander if item.label == "查看实际执行轨迹")
     assert not trace.proto.expanded and "supervisor -> market" in trace.text[0].value
+    saved.pop("stock_name")
     at.run()
+    assert "<h1>贵州茅台（600519）</h1>" in [item.proto.body for item in at.get("html")]
     at.text_input(key="history_symbol").set_value("600519").run()
     submit(at)
     assert graph.call_count == 1
     assert len(ReportStore().list_reports()) == 1
     assert at.session_state["result"]["report_id"] == saved["report_id"]
+
+
+def test_title_tracks_successful_stock_when_a_new_request_fails(graph):
+    at = submit(app())
+    at.text_input(key="symbol").set_value("000001")
+    submit(at)
+    assert "<h1>平安银行（000001）</h1>" in [item.proto.body for item in at.get("html")]
+    at.text_input(key="symbol").set_value("999")
+    submit(at)
+    assert at.error and "<h1>平安银行（000001）</h1>" in [item.proto.body for item in at.get("html")]
+    assert graph.call_count == 2
 
 
 def test_deepseek_only_explicit_submit_and_cache(graph, monkeypatch):
@@ -156,9 +173,12 @@ def test_deepseek_only_explicit_submit_and_cache(graph, monkeypatch):
 @pytest.mark.parametrize("status", ["ok", "empty", "model_error", "index_error"])
 def test_rag_states_and_research_real_route(graph, monkeypatch, status):
     from rag.errors import EmbeddingError, IndexCorruptionError
+    official_url = "https://static.cninfo.com.cn/finalpage/2024-06-12/1220324741.PDF"
     hit = {"document_id": "a" * 64, "chunk_id": "b" * 64, "document_name": "仅测试.pdf",
-           "page": 2, "text": "仅测试PDF原文，不是正式财报。", "score": 0.8, "metadata": {"symbol": "600519"}}
-    search = Mock(return_value=[hit] if status == "ok" else [])
+           "page": 2, "text": "仅测试PDF原文，不是正式财报。", "score": 0.8, "metadata": {"symbol": "600519"},
+           "official_pdf_url": official_url}
+    second_hit = {**hit, "chunk_id": "c" * 64}
+    search = Mock(return_value=[hit, second_hit] if status == "ok" else [])
     if status in ("model_error", "index_error"):
         search.side_effect = EmbeddingError("测试") if status == "model_error" else IndexCorruptionError("测试")
     monkeypatch.setattr(retrieval, "search_documents", search)
@@ -173,6 +193,9 @@ def test_rag_states_and_research_real_route(graph, monkeypatch, status):
     if status == "ok":
         assert any("仅测试PDF原文" in item.value for item in at.text)
         assert any("物理第2页" in item.label for item in at.expander)
+        for tab in (at.tabs[1], at.tabs[2], at.tabs[3]):
+            assert sum(f"{official_url}#page=2" in item.value for item in tab.markdown) == 2
+        assert ReportStore().get_report(state["report_id"])["sources"]["rag"]["references"][0]["official_pdf_url"] == official_url
     else:
         assert at.warning
     at.run()

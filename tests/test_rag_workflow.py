@@ -107,6 +107,14 @@ def test_pdf_instructions_do_not_change_routing_or_state(monkeypatch):
     assert result["rag_facts"]["records"][0]["text"] == malicious["text"]
 
 
+def test_unverified_pdf_link_is_not_in_reference(monkeypatch):
+    bad = {**hit(), "official_pdf_url": "https://static.cninfo.com.cn.example.org/fake.pdf"}
+    monkeypatch.setattr(retrieval, "search_documents", Mock(return_value=[bad]))
+    facts = retrieval.retrieve_document_facts("测试问题", symbol="600519")
+    assert facts["status"] == "ok"
+    assert all("official_pdf_url" not in entry for entry in [*facts["records"], *facts["sources"]])
+
+
 def model_response(summary, evidence=None, citations=None):
     content = {"summary": summary, "evidence": ["rag"] if evidence is None else evidence}
     if citations is not None:

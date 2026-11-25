@@ -106,6 +106,19 @@ def test_no_matching_candidates_never_load_model_or_fallback(tmp_path):
     embedder.encode.assert_not_called()
 
 
+def test_selected_document_narrows_candidates_before_ranking(tmp_path, monkeypatch):
+    embedder = TestVectors()
+    index = DocumentIndex(tmp_path / "index", embedder=embedder)
+    index.import_pdf(document(tmp_path, "another-announcement.pdf"), metadata=INFO)
+    selected = index.import_pdf(document(tmp_path, "selected-announcement.pdf"), metadata=INFO)["document_id"]
+    monkeypatch.setattr("rag.index.LocalEmbedder", lambda: embedder)
+
+    facts = retrieval.retrieve_document_facts("现金流", index_dir=index.path, symbol="600519", document_id=selected)
+    assert facts["status"] == "ok"
+    assert {item["document_id"] for item in facts["records"]} == {selected}
+    assert index.search_documents("现金流", document_id=selected, symbol="000001") == []
+
+
 def test_returned_metadata_cannot_mutate_stock_identity(tmp_path):
     index = DocumentIndex(tmp_path / "index", embedder=TestVectors())
     index.import_pdf(SAMPLE, metadata=INFO)
