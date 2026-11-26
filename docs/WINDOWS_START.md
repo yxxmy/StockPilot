@@ -8,11 +8,13 @@
 
 1. 解压项目到有写入权限的普通文件夹，例如“文档/StockPilot”，不要在压缩包内直接运行。
 2. 双击根目录 `Start_StockPilot.bat`，保留黑色窗口。
-3. 首次缺少环境时，从 python.org 下载 Python 3.12.10，验证 Windows 数字签名后安装到 `.runtime/python312`；创建 `.venv`，自动安装完整网页和时序依赖。已存在的可用 Python 3.12 虚拟环境会复用，不修改系统 PATH，不要求管理员权限。
+3. 启动器检查当前项目的 `.venv`、上次通过检查的环境、用户目录下的共享环境，以及系统可发现的 Python。先验证依赖版本、依赖冲突和关键库导入，通过即可复用。缺少依赖环境时才在 `%LOCALAPPDATA%\StockPilot\environments` 准备，缺少可用的 Python 3.12 x64 时再从 python.org 下载并验证签名。
 4. 检查依赖并启动本地服务，健康检查成功后自动打开默认浏览器。终端会显示实际网址，每次可能不同，只监听127.0.0.1；不会误连8502测试页面。
 5. 选择“本地规则”，点击“开始分析”。启动不会自动提交任务。关闭服务请在窗口按 Ctrl+C；不要关闭窗口后继续访问旧网址。
 
-首次安装需要联网，PyTorch等包较大，时间和磁盘占用取决于机器及网络。后续依赖文件不变时跳过安装，但仍检查依赖和关键库。新电脑不带你的PDF、FAISS索引、历史数据库或快照。
+首次安装需要联网，PyTorch 等包较大，时间和磁盘占用取决于机器及网络。新版启动成功后会记录通过验证的 Python 路径。以后即使把源码解压到新目录，只要该环境还在且符合新版依赖，就能继续使用。报告、PDF、索引和模型文件跟随各自的项目目录。
+
+如果可用的旧环境在另一个文件夹，且从未被新版启动器记录，可在新目录的 `scripts/python-local.txt` 写入旧环境中 `Scripts\python.exe` 的完整路径，每个文件只写一行。启动器验证通过后会记住这个位置。
 
 ## RAG 与 DeepSeek
 
@@ -22,7 +24,7 @@
 
 ## 故障与手动模式
 
-安装和服务输出保留在窗口，失败暂停供检查，不自动分析或无限重试。不要截图或转发包含私人路径、代理账户或其他敏感配置的完整终端内容。签名验证、下载或安装失败时停止，不绕过校验、不自动删除旧环境；网络恢复后可重新双击。已有 `.venv` 损坏或不是Python3.12时，请先手动改名备份，再重试。模型下载失败不代表已安装成功。
+安装和服务输出保留在窗口，失败时可查看具体提示。若签名验证、下载或安装失败，请处理对应问题后重新运行启动器。已有环境无法通过检查时，启动器会继续找其他可用环境。
 
 PowerShell策略由本次启动进程使用，不修改系统策略；企业禁止脚本或软件安装时需遵守本机管理要求。路径建议避免特殊字符 `%`、`!`。安装依赖没有锁定全部间接版本，未来新机器安装仍需回归验证。
 
@@ -34,7 +36,8 @@ powershell -NoProfile -File scripts/start_windows.ps1 -CheckOnly
 # 只准备依赖，不启动网页
 powershell -NoProfile -File scripts/start_windows.ps1 -PrepareOnly
 # 原手动入口仍可用
-.\.venv\Scripts\python.exe web_app.py --server.port 8501
+$stockPilotPython = Get-Content -LiteralPath (Join-Path $env:LOCALAPPDATA 'StockPilot\python-ready.txt') -Encoding UTF8 -First 1
+& $stockPilotPython web_app.py --server.port 8501
 ```
 
 验证记录见 PROJECT_PLAN.md：502项回归通过，已有环境检查及真实服务健康/首页200通过，默认浏览器调用通过替身测试。固定Python3.12.10有官方传统Windows安装程序，但不是最新安全修订版本，发布前需评估运行时更新。本机已有环境验证不能代替全新 Windows 机器的安装验收；正式对外发放前，还需在无Python的干净Windows x64机器完成下载、签名、安装、重启和异常网络测试。

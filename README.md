@@ -5,7 +5,7 @@ StockPilot 是本地运行的 A 股研究工具，提供行情分析、个股简
 ## 第一次使用
 
 1. 解压到有写入权限的普通目录，例如“文档/StockPilot”。不要在压缩包内双击运行。
-2. 双击 `Start_StockPilot.bat`。启动器优先复用可用环境，缺少环境时会联网准备 Python 3.12 和依赖。首次安装请保留终端窗口。
+2. 双击 `Start_StockPilot.bat`。启动器先验证已有 Python 3.12 和依赖，找到完整环境就复用。首次自动准备的环境保存在 Windows 用户目录，重新解压时也可以继续使用。安装时请保留终端窗口。
 3. 环境检查和服务启动成功后，自动打开浏览器；若没有自动打开，请使用窗口中显示的网址。
 4. 输入六位 A 股代码或完整股票简称，例如 `600519` 或 `贵州茅台`。选「本地规则」，点击「开始分析」。
 5. 窗口中按Ctrl+C停止服务。窗口关闭后，原网址将无法继续使用；下次重新双击启动。
@@ -20,7 +20,7 @@ StockPilot 是本地运行的 A 股研究工具，提供行情分析、个股简
 - SQLite历史报告；你的报告保存在你自己的电脑。
 - **公告原文查询**。按股票和问题检索 PDF，支持从巨潮资讯查找和导入官方公告。结果显示简短答案、引用段落、页码和可用的官方链接。
 - **个股波动预测**。估计下一交易日的波动幅度，并用历史行情比较滚动方差与 GARCH 的误差。
-- MCP stdio只读接口；开发者可运行 .venv\Scripts\python.exe mcp_stdio.py。
+- MCP stdio 只读接口；开发者可用启动器选中的 Python 运行 `mcp_stdio.py`。
 
 ## 可选功能
 
@@ -33,12 +33,13 @@ DeepSeek 读取本机的 `DEEPSEEK_API_KEY` 环境变量。使用 DeepSeek 模�
 2. 输入股票代码或简称。例如填 `600519`，在正文问题中输入「2023 年度分红的股权登记日是哪一天？每股现金分红是多少？」点击「查询公告原文」。
 3. 系统优先检索已有 PDF，缺少匹配时查找巨潮资讯公告。有多份候选时，选择要查询的一份。在「RAG原文」中核对答案和出处。
 
-也可以手动导入已核验身份的文字 PDF。在本目录打开 PowerShell 后运行：
+启动一次 StockPilot 后，也可以在项目目录打开 PowerShell，手动导入已核验身份的文字 PDF。
 
 ```powershell
 # 导入PDF：下列路径、公司名称和其他元数据须换成核验后的真实值
-.\.venv\Scripts\python.exe -m rag import-pdf "C:/Reports/已核验公告.pdf" --symbol 600519 --company-name "贵州茅台酒股份有限公司" --report-year 2023 --document-type announcement --disclosure-date 2024-06-12
-.\.venv\Scripts\python.exe -m rag search "权益分派日期是什么时候？" --symbol 600519 --top-k 3
+$stockPilotPython = Get-Content -LiteralPath (Join-Path $env:LOCALAPPDATA 'StockPilot\python-ready.txt') -Encoding UTF8 -First 1
+& $stockPilotPython -m rag import-pdf "C:/Reports/已核验公告.pdf" --symbol 600519 --company-name "贵州茅台酒股份有限公司" --report-year 2023 --document-type announcement --disclosure-date 2024-06-12
+& $stockPilotPython -m rag search "权益分派日期是什么时候？" --symbol 600519 --top-k 3
 ```
 
 扫描PDF目前不支持OCR。元数据由导入者核验，不按文件名猜股票身份。

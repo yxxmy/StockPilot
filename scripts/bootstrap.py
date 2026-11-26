@@ -1,14 +1,22 @@
 """Windows启动器的环境准备；不读取密钥，不触发行情或模型分析。"""
 import argparse
+from contextlib import suppress
 import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+from tempfile import NamedTemporaryFile
 
 ROOT = Path(__file__).resolve().parents[1]
 REQUIREMENTS = tuple(sorted(ROOT.glob('requirements*.txt')))
+INSTALL = ['-m', 'pip', 'install', '-r', 'requirements-ui.txt', '-r', 'requirements-forecast.txt']
+CHECKS = (
+    ['-m', 'pip', 'check'],
+    # PDF 模型在用户查询正文时加载，避免可选的 PyTorch DLL 阻断行情首页。
+    ['-c', 'import arch, streamlit, plotly, akshare, pandas, langgraph, sqlite3'],
+)
 
 
 def dependency_fingerprint():
@@ -44,25 +52,53 @@ def installed_requirements_match():
     return True
 
 
-def prepare(*, check_only=False):
+def probe():
+    if not installed_requirements_match():
+        return False
+    return all(subprocess.run([sys.executable, *arguments], cwd=ROOT,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+               for arguments in CHECKS)
+
+
+def prepare(*, check_only=False, managed=False):
     if sys.version_info[:2] != (3, 12):
         raise RuntimeError('This launcher requires Python 3.12. Existing environment was not replaced.')
-    marker = ROOT / '.venv' / 'stockpilot-ready.json'
-    expected = dependency_fingerprint()
-    try:
-        ready = json.loads(marker.read_text(encoding='utf-8')).get('fingerprint') == expected
-    except (OSError, ValueError, AttributeError):
-        ready = False
-    if not ready and not check_only and not installed_requirements_match():
+    needs_install = not check_only and not installed_requirements_match()
+    if needs_install:
         print('[2/4] Installing dependencies; first installation may take several minutes.', flush=True)
-        run_checked(['-m', 'pip', 'install', '-r', 'requirements-ui.txt', '-r', 'requirements-forecast.txt'])
-    # 标记不能替代环境校验：检查依赖冲突以及关键二进制库能否导入。
+        run_checked(INSTALL)
     print('[3/4] Checking dependencies...', flush=True)
-    run_checked(['-m', 'pip', 'check'])
-    # PDF 模型在用户查询正文时加载，避免可选的 PyTorch DLL 阻断行情首页。
-    run_checked(['-c', 'import arch, streamlit, plotly, akshare, pandas, langgraph, sqlite3'])
+    try:
+        for arguments in CHECKS:
+            run_checked(arguments)
+    except subprocess.CalledProcessError:
+        if check_only or not managed or needs_install:
+            raise
+        print('[2/4] Repairing the shared environment after a failed dependency check.', flush=True)
+        run_checked([*INSTALL, '--force-reinstall'])
+        for arguments in CHECKS:
+            run_checked(arguments)
     if not check_only:
-        marker.write_text(json.dumps({'fingerprint': expected}), encoding='utf-8')
+        environment = Path(sys.prefix) if managed else ROOT / '.venv'
+        marker = environment / 'stockpilot-ready.json'
+        marker.write_text(json.dumps({'fingerprint': dependency_fingerprint()}), encoding='utf-8')
+
+
+def remember_environment():
+    directory = Path(os.environ['LOCALAPPDATA']) / 'StockPilot'
+    pending = None
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        with NamedTemporaryFile(mode='w', encoding='utf-8', dir=directory, delete=False) as stream:
+            pending = Path(stream.name)
+            stream.write(sys.executable + '\n')
+        pending.replace(directory / 'python-ready.txt')
+    except OSError:
+        print('The environment is usable, but its path could not be saved for reuse.', flush=True)
+    finally:
+        if pending is not None:
+            with suppress(OSError):
+                pending.unlink()
 
 
 def main(argv=None):
@@ -71,15 +107,19 @@ def main(argv=None):
     parser.add_argument('--prepare-only', action='store_true')
     parser.add_argument('--download-model', action='store_true')
     parser.add_argument('--reuse', action='store_true')
+    parser.add_argument('--managed', action='store_true')
+    parser.add_argument('--remember', action='store_true')
     parser.add_argument('--probe', action='store_true')
     args = parser.parse_args(argv)
     if args.probe:
-        return 0 if installed_requirements_match() else 1
+        return 0 if probe() else 1
     os.chdir(ROOT)
     try:
-        prepare(check_only=args.check or args.reuse)
+        prepare(check_only=args.check or args.reuse, managed=args.managed)
         if args.check:
             return 0
+        if args.remember:
+            remember_environment()
         if args.download_model:
             run_checked(['-m', 'rag', 'download-model'])
             return 0
